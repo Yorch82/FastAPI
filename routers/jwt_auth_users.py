@@ -1,10 +1,19 @@
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_DURATION = 1
+SECRET = "cf6299238cb66522b955dabeb6c9bf5535e3365d30c2d2514094e20266632954"
 
 router = APIRouter()
 
 oauth2 = OAuth2PasswordBearer(tokenUrl="login")
+
+crypt = CryptContext(schemes=["bcrypt"])
 
 class User(BaseModel):
     username: str
@@ -15,44 +24,52 @@ class User(BaseModel):
 class UserDB(User):
     password: str
 
-
 users_db = {
     "yorch": {
         "username": "yorch",
         "full_name": "Jorge Campo",
         "email": "yorch@yorch.com",
         "disabled": False,
-        "password": "yorch123"
+        "password": "$2a$12$LQ0vFD4JEihaqIYarEIOw.HjCtPlkOkjhON2smqgZDPVfsBkpqNpq"
     },
     "yorch2": {
         "username": "yorch2",
         "full_name": "Jorge Campo 2",
         "email": "yorch2@yorch.com",
         "disabled": True,
-        "password": "yorch321"
+        "password": "$2a$12$IQ4dUVjPN0MgyTIGaXVmX.e3c7HzSWzTQmEDcGfD0If77e3ze8r3q"
     }
 }
 
 def search_user_db(username: str):
     if username in users_db:
         return UserDB(**users_db[username])
-
+    
 def search_user(username: str):
     if username in users_db:
         return User(**users_db[username])
-
-async def current_user(token: str = Depends(oauth2)):
-    user = search_user(token)
-    if not user:
-        raise HTTPException(
+    
+async def auth_user(token: str = Depends(oauth2)):
+    exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Credenciales de autenticación inválidas", 
             headers={"WWW-Authenticate": "Bearer"})
+    try:
+        username = jwt.decode(token, SECRET, algorithms=[ALGORITHM]).get("sub")
+        if username is None:
+            raise exception
+        
+    except JWTError:
+        raise exception    
+    return search_user(username)
+
+async def current_user(user: User = Depends(auth_user)):
     if user.disabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="usuario inactivo")            
     return user
+
 
 @router.post("/login")
 async def login(form: OAuth2PasswordRequestForm = Depends()):
@@ -61,13 +78,17 @@ async def login(form: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="El usuario no es correcto")    
-    user = search_user_db(form.username)
-    if not form.password == user.password:
+    user = search_user_db(form.username)    
+
+    if not crypt.verify(form.password, user.password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="La contraseña no es correcta")
     
-    return {"access_token": user.username, "token_type": "bearer"}
+    acces_token = {"sub":user.username, 
+                   "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_DURATION)}
+
+    return {"access_token": jwt.encode(acces_token, SECRET, algorithm=ALGORITHM), "token_type": "bearer"}
 
 @router.get("/users/me")
 async def me(user: User = Depends(current_user)):
